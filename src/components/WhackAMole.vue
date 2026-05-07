@@ -1,5 +1,5 @@
 <template>
-  <div id="wam-root">
+  <div id="wam-root" :class="{ 'day-mode': isDayMode }">
 
     <!-- Animated stars & fireflies -->
     <div class="stars-bg">
@@ -20,10 +20,15 @@
     <!-- Crescent moon -->
     <div class="moon"></div>
 
+    <!-- Day/Night Toggle Button -->
+    <div class="theme-toggle" @click="toggleTheme">
+      <div class="toggle-icon">{{ isDayMode ? '🌙' : '☀️' }}</div>
+    </div>
+
     <!-- Title -->
     <div class="title-row">
       <h1>🔨 Whack-a-Mole!</h1>
-      <p class="subtitle">🌙 Night Edition — tap the mole before it vanishes!</p>
+      <p class="subtitle">{{ isDayMode ? '☀️ Day Edition — tap the mole before it vanishes!' : '🌙 Night Edition — tap the mole before it vanishes!' }}</p>
     </div>
 
     <!-- Score panel with Coins -->
@@ -73,7 +78,7 @@
               :disabled="coins < item.cost || (item.owned && item.purchasable === false)"
               @click="buyPowerup(item)"
             >
-              {{ item.owned ? 'Owned' : 'Buy' }}
+              {{ item.owned && item.type === 'passive' ? 'Use' : (item.owned ? 'Owned' : 'Buy') }}
             </button>
             <div v-if="item.active" class="active-badge">ACTIVE</div>
           </div>
@@ -170,12 +175,11 @@
               :class="{ 
                 'mole-exit': exitingMole === i-1, 
                 'golden-mole': isGoldenMole,
-                'slow-mole': activePowerups.some(p => p.type === 'slow'),
-                'double-mole': activePowerups.some(p => p.type === 'double')
+                'slow-mole': activePowerups.some(p => p.id === 'slow_mole')
               }"
             >
               {{ currentMoleEmoji }}
-              <span v-if="activePowerups.some(p => p.type === 'double')" class="double-indicator">x2</span>
+              <span v-if="activePowerups.some(p => p.id === 'double_points')" class="double-indicator">x2</span>
             </span>
           </div>
           <div class="grass-strip"></div>
@@ -299,7 +303,8 @@ export default {
           type: 'instant',
           owned: false,
           purchasable: true,
-          active: false
+          active: false,
+          pendingUse: false
         },
         {
           id: 'mole_radar',
@@ -317,6 +322,13 @@ export default {
       activePowerups: [],
       radarActive: false,
       radarUses: 0,
+      
+      // Theme (Day/Night)
+      isDayMode: false,
+      
+      // Store original interval for restoration
+      originalMoleInterval: null,
+      isTimeFrozen: false,
       
       // Statistics
       stats: {
@@ -358,57 +370,59 @@ export default {
       coinSound: new Audio(coinSoundFile),
     }
   },
-watch: {
-  coins(newVal) {
-    // Auto-save whenever coins change
-    localStorage.setItem("playerCoins", newVal)
+
+  watch: {
+    coins(newVal) {
+      localStorage.setItem("playerCoins", newVal)
+    }
   },
   
-  'stats.totalHits'(newVal) {
-    // Save stats when they change
-    this.saveCoins()
-  }
-},
- mounted() {
-  this.generateParticles()
-  
-  // Load best score
-  const savedBest = localStorage.getItem("bestScore")
-  if (savedBest) {
-    this.best = parseInt(savedBest)
-  }
-  
-  // Load saved coins - THIS IS THE CRITICAL FIX
-  const savedCoins = localStorage.getItem("playerCoins")
-  if (savedCoins !== null) {
-    this.coins = parseInt(savedCoins)
-  } else {
-    this.coins = 0 // Initialize to 0 if no saved coins
-  }
-  
-  // Load owned powerups
-  const savedPowerups = localStorage.getItem("ownedPowerups")
-  if (savedPowerups) {
-    const owned = JSON.parse(savedPowerups)
-    this.shopItems.forEach(item => {
-      if (owned.includes(item.id)) {
-        item.owned = true
-      }
+  mounted() {
+    this.generateParticles()
+    
+    // Load best score
+    const savedBest = localStorage.getItem("bestScore")
+    if (savedBest) {
+      this.best = parseInt(savedBest)
+    }
+    
+    // Load saved coins
+    const savedCoins = localStorage.getItem("playerCoins")
+    if (savedCoins !== null) {
+      this.coins = parseInt(savedCoins)
+    } else {
+      this.coins = 0
+    }
+    
+    // Load saved theme
+    this.applySavedTheme()
+    
+    // Load owned powerups
+    const savedPowerups = localStorage.getItem("ownedPowerups")
+    if (savedPowerups) {
+      const owned = JSON.parse(savedPowerups)
+      this.shopItems.forEach(item => {
+        if (owned.includes(item.id)) {
+          item.owned = true
+          if (item.id === 'mole_radar' && item.uses === undefined) {
+            item.uses = 5
+          }
+        }
+      })
+    }
+    
+    // Load saved stats
+    const savedStats = localStorage.getItem("gameStats")
+    if (savedStats) {
+      const parsed = JSON.parse(savedStats)
+      this.stats = { ...this.stats, ...parsed }
+    }
+    
+    // Preload sounds
+    [this.hitSound, this.missSound, this.startSound, this.goldenSound, this.coinSound].forEach(sound => {
+      sound.load()
     })
-  }
-  
-  // Load saved stats
-  const savedStats = localStorage.getItem("gameStats")
-  if (savedStats) {
-    const parsed = JSON.parse(savedStats)
-    this.stats = { ...this.stats, ...parsed }
-  }
-  
-  // Preload sounds
-  [this.hitSound, this.missSound, this.startSound, this.goldenSound, this.coinSound].forEach(sound => {
-    sound.load()
-  })
-},
+  },
 
   beforeUnmount() {
     clearInterval(this.gameInterval)
@@ -427,6 +441,38 @@ watch: {
       return DIFFICULTY_SETTINGS[this.currentDifficulty]
     },
     
+    toggleTheme() {
+      this.isDayMode = !this.isDayMode
+      
+      if (this.isDayMode) {
+         document.documentElement.style.setProperty('--bg-gradient-start', '#87CEEB')  // Change this
+    document.documentElement.style.setProperty('--bg-gradient-mid', '#98D8E8')    // Change this
+    document.documentElement.style.setProperty('--bg-gradient-end', '#B0E0E6')    // Change this
+    document.documentElement.style.setProperty('--hole-shadow', '0 8px 24px rgba(0,0,0,0.3)')
+    document.documentElement.style.setProperty('--text-primary', '#2D3748')
+    document.documentElement.style.setProperty('--text-secondary', '#4A5568')
+        this.statusMsg = '☀️ Day Mode activated! ☀️'
+      } else {
+         document.documentElement.style.setProperty('--bg-gradient-start', '#0d0d2b')
+    document.documentElement.style.setProperty('--bg-gradient-mid', '#1a0a2e')
+    document.documentElement.style.setProperty('--bg-gradient-end', '#0f1a2e')
+    document.documentElement.style.setProperty('--hole-shadow', '0 8px 24px rgba(0,0,0,0.7)')
+    document.documentElement.style.setProperty('--text-primary', '#d8b4fe')
+    document.documentElement.style.setProperty('--text-secondary', '#c4b5fd')
+        this.statusMsg = '🌙 Night Mode activated! 🌙'
+      }
+      
+      // Save preference
+      localStorage.setItem('dayMode', this.isDayMode)
+    },
+    
+    applySavedTheme() {
+      const savedTheme = localStorage.getItem('dayMode')
+      if (savedTheme !== null) {
+        this.isDayMode = savedTheme === 'true'
+      }
+    },
+    
     buyPowerup(item) {
       if (this.coins < item.cost) {
         this.statusMsg = `❌ Not enough coins! Need ${item.cost}🪙`
@@ -441,7 +487,7 @@ watch: {
         
         this.coins -= item.cost
         this.coinSound.play()
-        this.stats.totalCoinsEarned -= item.cost // Track spending
+        this.stats.totalCoinsEarned -= item.cost
         this.saveCoins()
         
         // Activate powerup
@@ -453,162 +499,203 @@ watch: {
           this.coins -= item.cost
           this.coinSound.play()
           item.owned = true
+          item.uses = 5
           this.saveOwnedPowerups()
-          this.statusMsg = `🎉 Purchased ${item.name}! You now have ${item.uses} uses remaining.`
+          this.saveCoins()
+          this.statusMsg = `🎉 Purchased ${item.name}! You have ${item.uses} uses. Click again to use!`
         } else if (item.uses > 0) {
           // Use the radar
           this.useRadar()
           item.uses--
-          this.statusMsg = `📡 Radar used! ${item.uses} uses remaining.`
           this.saveOwnedPowerups()
+          this.statusMsg = `📡 Radar used! ${item.uses} uses remaining.`
         } else {
-          this.statusMsg = `❌ No uses left! Buy again to recharge.`
+          // Offer to recharge
+          if (confirm(`No uses left! Buy ${item.name} again for ${item.cost}🪙?`)) {
+            if (this.coins >= item.cost) {
+              this.coins -= item.cost
+              item.uses = 5
+              this.saveCoins()
+              this.saveOwnedPowerups()
+              this.statusMsg = `🔄 ${item.name} recharged! ${item.uses} uses remaining.`
+            } else {
+              this.statusMsg = `❌ Not enough coins to recharge! Need ${item.cost}🪙`
+            }
+          }
         }
       }
       else if (item.type === 'instant') {
+        // Handle instant powerups (Extra Time)
         this.coins -= item.cost
         this.coinSound.play()
         this.stats.totalCoinsEarned -= item.cost
         this.saveCoins()
         
-        // Apply instant effect
-        if (item.id === 'extra_time' && this.running) {
-          this.timeLeft += 10
-          this.statusMsg = `⏰ +10 seconds added! Time left: ${this.timeLeft}s`
-          this.showPopupMessage('+10s ⏰', 'center')
-        } else if (item.id === 'extra_time') {
-          this.statusMsg = `🎁 Extra Time purchased! Use it during a game!`
+        // Apply instant effect immediately
+        if (item.id === 'extra_time') {
+          if (this.running) {
+            // Game is running - add time NOW
+            this.timeLeft += 10
+            this.statusMsg = `⏰ +10 seconds added! Time left: ${this.timeLeft}s`
+            this.showPopupMessage(`+10s ⏰`)
+            
+            // Show visual feedback
+            this.triggerScoreBounce()
+            
+            // Create a popup effect
+            const randomHole = Math.floor(Math.random() * 9)
+            this.showPopup(randomHole, true, '+10s ⏰')
+          } else {
+            // Game not running - save as a one-time use item
+            if (!item.pendingUse) {
+              item.pendingUse = true
+              this.statusMsg = `🎁 Extra Time purchased! It will activate when you start a game!`
+            } else {
+              // Use the pending extra time
+              item.pendingUse = false
+              this.timeLeft += 10
+              this.statusMsg = `⏰ +10 seconds added! Time left: ${this.timeLeft}s`
+            }
+          }
         }
       }
     },
     
     activatePowerup(item) {
-  const powerup = {
-    id: item.id,
-    name: item.name,
-    icon: item.icon,
-    type: item.type,
-    duration: item.duration,
-    timeLeft: item.duration / 1000,
-    active: true
-  }
-  
-  this.activePowerups.push(powerup)
-  item.active = true
-  
-  // Apply powerup effects
-  if (item.id === 'time_freeze') {
-    // Store the current interval reference
-    const oldInterval = this.gameInterval
-    
-    // Clear the timer but save remaining time
-    if (this.gameInterval) {
-      clearInterval(this.gameInterval)
-      this.gameInterval = null
-    }
-    
-    // Also clear mole spawns during freeze
-    if (this.moleLoopTimer) {
-      clearInterval(this.moleLoopTimer)
-      this.moleLoopTimer = null
-    }
-    
-    // Set timer to resume after duration
-    const timer = setTimeout(() => {
-      // Resume game timer
-      this.gameInterval = setInterval(() => {
-        if (this.timeLeft > 0 && this.running) {
-          this.timeLeft--
-          if (this.timeLeft <= 0) {
-            this.endGame()
-          }
+      const powerup = {
+        id: item.id,
+        name: item.name,
+        icon: item.icon,
+        duration: item.duration,
+        timeLeft: item.duration / 1000,
+        active: true
+      }
+      
+      this.activePowerups.push(powerup)
+      item.active = true
+      
+      // Handle different powerup effects
+      if (item.id === 'time_freeze') {
+        this.activateTimeFreeze(item)
+      }
+      else if (item.id === 'slow_mole') {
+        this.activateSlowMole(item)
+      }
+      else if (item.id === 'double_points') {
+        this.statusMsg = '✨ DOUBLE POINTS! Score x2 for 20 seconds! ✨'
+      }
+      
+      // Set timer to deactivate
+      const deactivateTimer = setTimeout(() => {
+        this.deactivatePowerup(item.id)
+      }, item.duration)
+      this.powerupTimers.push(deactivateTimer)
+      
+      // Update timer display
+      const interval = setInterval(() => {
+        const p = this.activePowerups.find(p => p.id === item.id)
+        if (p) {
+          p.timeLeft = Math.max(0, p.timeLeft - 1)
+          if (p.timeLeft <= 0) clearInterval(interval)
+        } else {
+          clearInterval(interval)
         }
       }, 1000)
+    },
+    
+    activateTimeFreeze(item) {
+      if (this.isTimeFrozen) return
       
-      // Resume mole spawning
-      const settings = this.getDifficultySettings()
-      let interval = settings.interval
-      if (this.activePowerups.some(p => p.id === 'slow_mole')) {
-        interval = interval * 1.2
+      this.isTimeFrozen = true
+      
+      // Clear any existing mole timeout to prevent mole from disappearing during freeze
+      if (this.moleTimeout) {
+        clearTimeout(this.moleTimeout)
+        this.moleTimeout = null
       }
-      this.moleLoopTimer = setInterval(() => {
-        if (this.running) this.showMole()
-      }, interval)
       
-      this.statusMsg = '⏰ Time freeze ended! Game resumes!'
-    }, item.duration)
+      this.statusMsg = '⏰ TIME FREEZE! Timer stopped for 10 seconds!'
+      
+      // Set timer to resume after duration
+      const resumeTimer = setTimeout(() => {
+        this.resumeAfterTimeFreeze()
+      }, item.duration)
+      this.powerupTimers.push(resumeTimer)
+    },
     
-    this.powerupTimers.push(timer)
-    this.statusMsg = '⏰ TIME FREEZE! Timer stopped for 10 seconds!'
-  }
-  
-  // For Slow Motion powerup
-  if (item.id === 'slow_mole') {
-    // Restart mole spawn loop with slower interval
-    if (this.moleLoopTimer) {
-      clearInterval(this.moleLoopTimer)
-      const settings = this.getDifficultySettings()
-      const slowerInterval = settings.interval * 1.5
-      this.moleLoopTimer = setInterval(() => {
-        if (this.running) this.showMole()
-      }, slowerInterval)
-    }
-    this.statusMsg = '🐢 Slow Motion active! Moles move slower!'
-  }
-  
-  // For Double Points powerup
-  if (item.id === 'double_points') {
-    this.statusMsg = '✨ DOUBLE POINTS! Score x2 for 20 seconds! ✨'
-  }
-  
-  // Set timer to deactivate
-  const deactivateTimer = setTimeout(() => {
-    this.deactivatePowerup(item.id)
-  }, item.duration)
-  this.powerupTimers.push(deactivateTimer)
-  
-  // Update timer display
-  const interval = setInterval(() => {
-    const p = this.activePowerups.find(p => p.id === item.id)
-    if (p) {
-      p.timeLeft = Math.max(0, p.timeLeft - 1)
-      if (p.timeLeft <= 0) clearInterval(interval)
-    } else {
-      clearInterval(interval)
-    }
-  }, 1000)
-},
+    resumeAfterTimeFreeze() {
+      if (!this.isTimeFrozen) return
+      
+      this.isTimeFrozen = false
+      
+      if (this.running) {
+        this.statusMsg = '⏰ Time freeze ended! Game resumes!'
+        
+        // Make sure the current mole doesn't stay forever
+        if (this.activeMole !== null) {
+          const settings = this.getDifficultySettings()
+          let visibleDuration = settings.visible
+          if (this.activePowerups.some(p => p.id === 'slow_mole')) {
+            visibleDuration = visibleDuration * 1.5
+          }
+          
+          // Clear existing timeout first
+          if (this.moleTimeout) {
+            clearTimeout(this.moleTimeout)
+          }
+          
+          // Set new timeout to hide mole
+          this.moleTimeout = setTimeout(() => {
+            this.hideMole(true)
+          }, visibleDuration)
+        }
+      }
+    },
     
-    deactivatePowerup(id) {
-  const index = this.activePowerups.findIndex(p => p.id === id)
-  if (index !== -1) {
-    this.activePowerups.splice(index, 1)
-    const shopItem = this.shopItems.find(item => item.id === id)
-    if (shopItem) shopItem.active = false
-    
-    // Special handling for slow mole deactivation
-    if (id === 'slow_mole' && this.running) {
-      // Restart mole spawn with normal speed
-      if (this.moleLoopTimer) {
+    activateSlowMole(item) {
+      // Restart mole spawn loop with slower interval
+      if (this.moleLoopTimer && this.running && !this.isTimeFrozen) {
         clearInterval(this.moleLoopTimer)
         const settings = this.getDifficultySettings()
+        const slowerInterval = settings.interval * 1.5
         this.moleLoopTimer = setInterval(() => {
-          if (this.running) this.showMole()
-        }, settings.interval)
+          if (this.running && !this.isTimeFrozen) this.showMole()
+        }, slowerInterval)
       }
-      this.statusMsg = `🐢 Slow Motion ended! Moles back to normal speed.`
-    }
-    else if (id === 'time_freeze') {
-      this.statusMsg = `⏰ Time Freeze ended!`
-    }
-    else if (id === 'double_points') {
-      this.statusMsg = `✨ Double Points ended!`
-    }
-    else {
-      this.statusMsg = `⏹️ ${shopItem?.name || 'Powerup'} has ended!`
-    }
-  }
-},
+      this.statusMsg = '🐢 Slow Motion active! Moles move slower!'
+    },
+    
+    deactivatePowerup(id) {
+      const index = this.activePowerups.findIndex(p => p.id === id)
+      if (index !== -1) {
+        this.activePowerups.splice(index, 1)
+        const shopItem = this.shopItems.find(item => item.id === id)
+        if (shopItem) shopItem.active = false
+        
+        // Special handling for different powerups
+        if (id === 'slow_mole' && this.running && !this.isTimeFrozen) {
+          // Restart mole spawn with normal speed
+          if (this.moleLoopTimer) {
+            clearInterval(this.moleLoopTimer)
+            const settings = this.getDifficultySettings()
+            this.moleLoopTimer = setInterval(() => {
+              if (this.running && !this.isTimeFrozen) this.showMole()
+            }, settings.interval)
+          }
+          this.statusMsg = `🐢 Slow Motion ended! Moles back to normal speed.`
+        }
+        else if (id === 'double_points') {
+          this.statusMsg = `✨ Double Points ended!`
+        }
+        else if (id === 'time_freeze') {
+          // Already handled by resumeAfterTimeFreeze
+          this.statusMsg = `⏰ Time Freeze ended!`
+        }
+        else {
+          this.statusMsg = `⏹️ ${shopItem?.name || 'Powerup'} has ended!`
+        }
+      }
+    },
     
     useRadar() {
       if (this.activeMole !== null && this.running) {
@@ -622,26 +709,23 @@ watch: {
     },
     
     addCoins(amount) {
-  this.coins += amount
-  this.stats.totalCoinsEarned += amount
-  this.saveCoins() // This saves to localStorage
-  this.triggerCoinAnimation()
-},
+      this.coins += amount
+      this.stats.totalCoinsEarned += amount
+      this.saveCoins()
+      this.triggerCoinAnimation()
+    },
     
-   saveCoins() {
-  // Save coins separately
-  localStorage.setItem("playerCoins", this.coins)
-  
-  // Save stats separately
-  localStorage.setItem("gameStats", JSON.stringify({
-    totalHits: this.stats.totalHits,
-    totalMisses: this.stats.totalMisses,
-    accuracy: this.stats.accuracy,
-    fastestReaction: this.stats.fastestReaction,
-    goldenHits: this.stats.goldenHits,
-    totalCoinsEarned: this.stats.totalCoinsEarned
-  }))
-},
+    saveCoins() {
+      localStorage.setItem("playerCoins", this.coins)
+      localStorage.setItem("gameStats", JSON.stringify({
+        totalHits: this.stats.totalHits,
+        totalMisses: this.stats.totalMisses,
+        accuracy: this.stats.accuracy,
+        fastestReaction: this.stats.fastestReaction,
+        goldenHits: this.stats.goldenHits,
+        totalCoinsEarned: this.stats.totalCoinsEarned
+      }))
+    },
     
     saveOwnedPowerups() {
       const owned = this.shopItems.filter(item => item.owned).map(item => item.id)
@@ -650,7 +734,6 @@ watch: {
     
     triggerCoinAnimation() {
       const coinMsg = { hit: true, text: '+🪙' }
-      // Show coin popup at random hole for effect
       const randomHole = Math.floor(Math.random() * 9)
       const updated = [...this.popups]
       updated[randomHole] = coinMsg
@@ -662,20 +745,24 @@ watch: {
       }, 900)
     },
     
-    showPopupMessage(text, position = 'status') {
-      if (position === 'status') {
-        this.statusMsg = text
-      }
+    showPopupMessage(text) {
+      this.statusMsg = text
     },
     
     showMole() {
+      // Don't spawn new moles during time freeze
+      if (this.isTimeFrozen) return
+      
       this.hideMole()
       
       // Random hole index between 0 and 8
       this.activeMole = Math.floor(Math.random() * 9)
       
-      // Golden mole chance (reduced if double points active for balance)
-      const goldenChance = this.activePowerups.some(p => p.type === 'double') ? 0.2 : 0.15
+      // Adjust golden mole chance based on theme
+      let goldenChance = 0.15
+      if (!this.isDayMode) {
+        goldenChance = 0.2 // Slightly higher chance at night
+      }
       this.isGoldenMole = Math.random() < goldenChance
       
       if (this.isGoldenMole) {
@@ -690,7 +777,7 @@ watch: {
       // Adjust visibility time if slow motion active
       let visibleDuration = this.getDifficultySettings().visible
       if (this.activePowerups.some(p => p.id === 'slow_mole')) {
-        visibleDuration = visibleDuration * 1.5 // 50% slower
+        visibleDuration = visibleDuration * 1.5
       }
       
       // Hide the mole after visibility duration
@@ -699,30 +786,34 @@ watch: {
       }, visibleDuration)
     },
     
-   hideMole(isMiss = false) {
-  if (this.activeMole !== null) {
-    if (isMiss && this.running) {
-      this.combo = 0
-      this.comboMultiplier = 1
-      this.stats.totalMisses++
-      this.updateAccuracy()
-    }
-    
-    this.exitingMole = this.activeMole
-    setTimeout(() => {
-      this.exitingMole = null
-    }, 220)
-    this.activeMole = null
-    this.moleSpawnTime = null
-  }
-  if (this.moleTimeout) {
-    clearTimeout(this.moleTimeout)
-    this.moleTimeout = null
-  }
-},
+    hideMole(isMiss = false) {
+      if (this.activeMole !== null) {
+        if (isMiss && this.running && !this.isTimeFrozen) {
+          this.combo = 0
+          this.comboMultiplier = 1
+          this.stats.totalMisses++
+          this.updateAccuracy()
+        }
+        
+        this.exitingMole = this.activeMole
+        setTimeout(() => {
+          this.exitingMole = null
+        }, 220)
+        this.activeMole = null
+        this.moleSpawnTime = null
+      }
+      if (this.moleTimeout) {
+        clearTimeout(this.moleTimeout)
+        this.moleTimeout = null
+      }
+    },
 
     whackMole(idx) {
       if (!this.running) return
+      if (this.isTimeFrozen) {
+        this.statusMsg = '⏰ Time is frozen! Cannot whack!'
+        return
+      }
 
       if (this.activeMole === idx) {
         // Calculate reaction time
@@ -746,16 +837,16 @@ watch: {
         }
         
         if (this.isGoldenMole) {
-          basePoints = 100 // Golden mole gives more with powerups
+          basePoints = 100
           this.goldenSound.currentTime = 0
           this.goldenSound.play()
           this.stats.goldenHits++
           this.statusMsg = '🪙 GOLDEN MOLE! +100 points! 🪙'
-          this.addCoins(25) // Bonus coins for golden mole
+          this.addCoins(25)
         } else {
           this.hitSound.currentTime = 0
           this.hitSound.play()
-          this.addCoins(5) // 5 coins per regular hit
+          this.addCoins(5)
         }
         
         // Combo multiplier
@@ -798,6 +889,9 @@ watch: {
         
         // Save stats
         this.saveCoins()
+        
+        // Remove the mole immediately after hit
+        this.activeMole = null
       } else {
         // Miss
         this.missSound.currentTime = 0
@@ -819,154 +913,178 @@ watch: {
     },
 
     startGame() {
-  if (this.running) return
-    this.activePowerups = []
-  this.shopItems.forEach(item => {
-    if (item.type === 'active') {
-      item.active = false
-    }
-  })
-  // Make sure any existing game is fully cleaned up
-  if (this.gameInterval || this.moleLoopTimer) {
-    this.resetGame()
-  }
-  
-  this.startSound.play()
-  this.running = true
-  this.score = 0
-  this.combo = 0
-  this.comboMultiplier = 1
-  this.timeLeft = BASE_GAME_DURATION
-  this.statusMsg = `🌙 ${this.currentDifficulty} mode activated! Good luck!`
-  this.highScoreNote = ''
-  this.showShop = false
-  
-  // Reset reaction tracking
-  this.stats.hitTimes = []
-  this.stats.fastestReaction = 999
-
-  // Countdown timer - store reference
-  this.gameInterval = setInterval(() => {
-    if (this.timeLeft > 0 && this.running) {
-      this.timeLeft--
-      if (this.timeLeft <= 0) {
-        this.endGame()
+      if (this.running) return
+      
+      // Check for pending extra time powerup
+      const extraTimeItem = this.shopItems.find(item => item.id === 'extra_time')
+      if (extraTimeItem && extraTimeItem.pendingUse) {
+        extraTimeItem.pendingUse = false
+        setTimeout(() => {
+          if (this.running) {
+            this.timeLeft += 10
+            this.statusMsg = `⏰ +10 seconds bonus activated! Time left: ${this.timeLeft}s`
+            this.showPopup(Math.floor(Math.random() * 9), true, '+10s BONUS!')
+          }
+        }, 100)
       }
-    }
-  }, 1000)
+      
+      // Clear all active powerups before starting new game
+      this.activePowerups = []
+      this.isTimeFrozen = false
+      this.shopItems.forEach(item => {
+        if (item.type === 'active') {
+          item.active = false
+        }
+      })
+      
+      // Make sure any existing game is fully cleaned up
+      if (this.gameInterval || this.moleLoopTimer) {
+        this.resetGame()
+      }
+      
+      this.startSound.play()
+      this.running = true
+      this.score = 0
+      this.combo = 0
+      this.comboMultiplier = 1
+      this.timeLeft = BASE_GAME_DURATION
+      this.statusMsg = `🌙 ${this.currentDifficulty} mode activated! Good luck!`
+      this.highScoreNote = ''
+      this.showShop = false
+      
+      // Reset reaction tracking
+      this.stats.hitTimes = []
+      this.stats.fastestReaction = 999
 
-  const settings = this.getDifficultySettings()
-  let interval = settings.interval
-  
-  // Adjust spawn rate if slow motion active
-  if (this.activePowerups.some(p => p.id === 'slow_mole')) {
-    interval = interval * 1.2
-  }
-  
-  // Mole spawn loop
-  this.moleLoopTimer = setInterval(() => {
-    if (this.running) this.showMole()
-  }, interval)
+      // Countdown timer - checks isTimeFrozen
+      this.gameInterval = setInterval(() => {
+        // Only count down if game is running AND time is NOT frozen
+        if (this.running && !this.isTimeFrozen && this.timeLeft > 0) {
+          this.timeLeft--
+          if (this.timeLeft <= 0) {
+            this.endGame()
+          }
+        }
+      }, 1000)
 
-  this.showMole()
-},
+      const settings = this.getDifficultySettings()
+      let interval = settings.interval
+      
+      // Adjust spawn rate if slow motion active
+      if (this.activePowerups.some(p => p.id === 'slow_mole')) {
+        interval = interval * 1.5
+      }
+      
+      // Mole spawn loop - checks isTimeFrozen
+      this.moleLoopTimer = setInterval(() => {
+        // Only spawn moles if game is running AND time is NOT frozen
+        if (this.running && !this.isTimeFrozen) {
+          this.showMole()
+        }
+      }, interval)
+
+      this.showMole()
+    },
 
     endGame() {
-  // Prevent multiple calls
-  if (!this.running) return
-  
-  this.running = false
-  
-  // Clear intervals
-  if (this.gameInterval) {
-    clearInterval(this.gameInterval)
-    this.gameInterval = null
-  }
-  
-  if (this.moleLoopTimer) {
-    clearInterval(this.moleLoopTimer)
-    this.moleLoopTimer = null
-  }
-  
-  this.hideMole()
+      if (!this.running) return
+      
+      this.running = false
+      this.isTimeFrozen = false
+      
+      // Clear intervals
+      if (this.gameInterval) {
+        clearInterval(this.gameInterval)
+        this.gameInterval = null
+      }
+      
+      if (this.moleLoopTimer) {
+        clearInterval(this.moleLoopTimer)
+        this.moleLoopTimer = null
+      }
+      
+      this.hideMole()
 
-  // Calculate average reaction time
-  const avgReaction = this.stats.hitTimes.length > 0 
-    ? Math.round(this.stats.hitTimes.reduce((a,b) => a + b, 0) / this.stats.hitTimes.length)
-    : 0
-  
-  // Bonus coins for high score
-  let bonusCoins = 0
-  if (this.score > this.best) {
-    this.best = this.score
-    bonusCoins = 50
-    this.addCoins(bonusCoins)
-    localStorage.setItem("bestScore", this.best)
-    this.highScoreNote = `🏆 NEW HIGH SCORE! ${this.score} pts | +${bonusCoins}🪙 BONUS! 🏆`
-  } else {
-    this.highScoreNote = `🎮 Final: ${this.score} pts | Best: ${this.best} pts | Best Combo: ${this.combo}x | Avg RT: ${avgReaction}ms`
-  }
-  
-  this.saveCoins()
-},
+      // Calculate average reaction time
+      const avgReaction = this.stats.hitTimes.length > 0 
+        ? Math.round(this.stats.hitTimes.reduce((a,b) => a + b, 0) / this.stats.hitTimes.length)
+        : 0
+      
+      // Bonus coins for high score
+      let bonusCoins = 0
+      if (this.score > this.best) {
+        this.best = this.score
+        bonusCoins = 50
+        this.addCoins(bonusCoins)
+        localStorage.setItem("bestScore", this.best)
+        this.highScoreNote = `🏆 NEW HIGH SCORE! ${this.score} pts | +${bonusCoins}🪙 BONUS! 🏆`
+      } else {
+        this.highScoreNote = `🎮 Final: ${this.score} pts | Best: ${this.best} pts | Best Combo: ${this.combo}x | Avg RT: ${avgReaction}ms`
+      }
+      
+      this.saveCoins()
+    },
 
     resetGame() {
-  // Stop the game if it's running
-  if (this.running) {
-    this.running = false
-  }
-  
-  // Clear ALL intervals and timeouts
-  if (this.gameInterval) {
-    clearInterval(this.gameInterval)
-    this.gameInterval = null
-  }
-  
-  if (this.moleLoopTimer) {
-    clearInterval(this.moleLoopTimer)
-    this.moleLoopTimer = null
-  }
-  
-  if (this.moleTimeout) {
-    clearTimeout(this.moleTimeout)
-    this.moleTimeout = null
-  }
-  
-  // Clear powerup timers
-  this.powerupTimers.forEach(timer => clearTimeout(timer))
-  this.powerupTimers = []
-  
-  // Deactivate all active powerups
-  this.activePowerups = []
-  this.shopItems.forEach(item => {
-    if (item.type === 'active') {
-      item.active = false
-    }
-  })
-  
-  // Hide any active mole
-  this.hideMole()
-  
-  // Reset all game state
-  this.score = 0
-  this.combo = 0
-  this.comboMultiplier = 1
-  this.timeLeft = BASE_GAME_DURATION
-  this.activeMole = null
-  this.exitingMole = null
-  this.flashHole = null
-  
-  // Reset UI
-  this.statusMsg = '🎮 Press Start to play!'
-  this.highScoreNote = ''
-  
-  // Clear any pending popups
-  this.popups = Array(9).fill(null)
-  this.particles = Array(9).fill(false)
-  
-  // Close shop if open
-  this.showShop = false
-},
+      // Stop the game if it's running
+      if (this.running) {
+        this.running = false
+      }
+      
+      this.isTimeFrozen = false
+      
+      // Clear ALL intervals and timeouts
+      if (this.gameInterval) {
+        clearInterval(this.gameInterval)
+        this.gameInterval = null
+      }
+      
+      if (this.moleLoopTimer) {
+        clearInterval(this.moleLoopTimer)
+        this.moleLoopTimer = null
+      }
+      
+      if (this.moleTimeout) {
+        clearTimeout(this.moleTimeout)
+        this.moleTimeout = null
+      }
+      
+      // Clear powerup timers
+      this.powerupTimers.forEach(timer => clearTimeout(timer))
+      this.powerupTimers = []
+      
+      // Deactivate all active powerups
+      this.activePowerups = []
+      this.shopItems.forEach(item => {
+        if (item.type === 'active') {
+          item.active = false
+        }
+      })
+      
+      // Hide any active mole
+      this.hideMole()
+      
+      // Reset all game state
+      this.score = 0
+      this.combo = 0
+      this.comboMultiplier = 1
+      this.timeLeft = BASE_GAME_DURATION
+      this.activeMole = null
+      this.exitingMole = null
+      this.flashHole = null
+      
+      // Reset UI
+      this.statusMsg = '🎮 Press Start to play!'
+      this.highScoreNote = ''
+      
+      // Clear any pending popups
+      this.popups = Array(9).fill(null)
+      this.particles = Array(9).fill(false)
+      
+      // Close shop if open
+      this.showShop = false
+    },
+    
     triggerScoreBounce() {
       this.scoreBounce = false
       this.$nextTick(() => { this.scoreBounce = true })
@@ -1053,7 +1171,6 @@ watch: {
     },
 
     generateParticles() {
-      // Stars
       this.stars = Array.from({ length: 80 }, (_, i) => {
         const size = Math.random() < 0.15 ? 3 : Math.random() < 0.4 ? 2 : 1
         return {
@@ -1069,7 +1186,6 @@ watch: {
         }
       })
 
-      // Fireflies
       this.fireflies = Array.from({ length: 10 }, (_, i) => ({
         id: i,
         style: {
@@ -1089,17 +1205,28 @@ watch: {
 <style scoped>
 @import url('https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;700;800&display=swap');
 
+/* ── Theme Variables ─────────────────────────────────────────────── */
+:root {
+  --bg-gradient-start: #0d0d2b;
+  --bg-gradient-mid: #1a0a2e;
+  --bg-gradient-end: #0f1a2e;
+  --hole-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+  --text-primary: #d8b4fe;
+  --text-secondary: #c4b5fd;
+}
+
 /* ── Root layout ─────────────────────────────────────────────────── */
 #wam-root {
   font-family: 'Nunito', sans-serif;
   min-height: 100vh;
-  background: linear-gradient(160deg, #0d0d2b 0%, #1a0a2e 40%, #0f1a2e 100%);
+  background: linear-gradient(160deg, var(--bg-gradient-start) 0%, var(--bg-gradient-mid) 40%, var(--bg-gradient-end) 100%);
   display: flex;
   flex-direction: column;
   align-items: center;
   padding: 24px 16px 40px;
   position: relative;
   overflow: hidden;
+  transition: background 0.5s ease;
 }
 
 #wam-root::before {
@@ -1178,6 +1305,39 @@ watch: {
   border-radius: 50%;
 }
 
+/* ── Theme Toggle Button ─────────────────────────────────────────── */
+.theme-toggle {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 100;
+  cursor: pointer;
+  width: 50px;
+  height: 50px;
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(10px);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.theme-toggle:hover {
+  transform: scale(1.1);
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.toggle-icon {
+  font-size: 1.8rem;
+  transition: transform 0.3s ease;
+}
+
+.theme-toggle:active .toggle-icon {
+  transform: rotate(180deg);
+}
+
 /* ── Title ───────────────────────────────────────────────────────── */
 .title-row {
   position: relative;
@@ -1196,14 +1356,16 @@ watch: {
     6px 6px 0 rgba(123, 47, 247, 0.3);
   letter-spacing: 1px;
   line-height: 1;
+  transition: all 0.3s ease;
 }
 
 .subtitle {
   font-size: 0.95rem;
-  color: rgba(200, 180, 255, 0.8);
+  color: var(--text-secondary);
   margin-top: 6px;
   font-weight: 700;
   letter-spacing: 0.5px;
+  transition: color 0.3s ease;
 }
 
 /* ── Score panel ─────────────────────────────────────────────────── */
@@ -1225,7 +1387,7 @@ watch: {
   text-align: center;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.07);
   min-width: 110px;
-  transition: transform 0.15s;
+  transition: transform 0.15s, background 0.3s ease;
   cursor: pointer;
 }
 
@@ -1246,14 +1408,16 @@ watch: {
   font-weight: 800;
   letter-spacing: 1.5px;
   text-transform: uppercase;
-  color: rgba(180, 140, 255, 0.75);
+  color: var(--text-secondary);
+  transition: color 0.3s ease;
 }
 
 .score-value {
   font-family: 'Fredoka One', cursive;
   font-size: 2rem;
   line-height: 1.1;
-  color: #d8b4fe;
+  color: var(--text-primary);
+  transition: color 0.3s ease;
 }
 
 .combo-active {
@@ -1298,6 +1462,7 @@ watch: {
   overflow-y: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 0 2px rgba(124, 58, 237, 0.3);
   border: 1px solid rgba(167, 139, 250, 0.3);
+  transition: all 0.3s ease;
 }
 
 .shop-slide-enter-active, .shop-slide-leave-active {
@@ -1485,6 +1650,7 @@ watch: {
   backdrop-filter: blur(10px);
   width: 100%;
   max-width: 500px;
+  transition: all 0.3s ease;
 }
 
 .stats-grid {
@@ -1544,7 +1710,7 @@ watch: {
   cursor: pointer;
   padding: 12px 32px;
   border-radius: 50px;
-  transition: transform 0.12s, box-shadow 0.12s;
+  transition: transform 0.12s, box-shadow 0.12s, background 0.3s ease;
 }
 
 .btn:active { transform: translateY(3px); }
@@ -1577,10 +1743,11 @@ watch: {
   z-index: 2;
   font-size: 0.9rem;
   font-weight: 700;
-  color: rgba(200, 180, 255, 0.9);
+  color: var(--text-secondary);
   margin-top: 10px;
   min-height: 22px;
   letter-spacing: 0.3px;
+  transition: color 0.3s ease;
 }
 
 .high-score-note {
@@ -1588,9 +1755,10 @@ watch: {
   z-index: 2;
   margin-top: 14px;
   font-size: 0.82rem;
-  color: rgba(200, 180, 255, 0.8);
+  color: var(--text-secondary);
   font-weight: 700;
   min-height: 20px;
+  transition: color 0.3s ease;
 }
 
 /* ── Meadow ──────────────────────────────────────────────────────── */
@@ -1607,6 +1775,7 @@ watch: {
     inset 0 1px 0 rgba(100, 255, 150, 0.10);
   width: 100%;
   max-width: 560px;
+  transition: background 0.3s ease;
 }
 
 .meadow-top {
@@ -1648,7 +1817,7 @@ watch: {
     inset 0 2px 6px rgba(100, 255, 120, 0.04),
     0 0 0 2px rgba(50, 120, 60, 0.2);
   overflow: hidden;
-  transition: transform 0.1s;
+  transition: transform 0.1s, background 0.3s ease, box-shadow 0.3s ease;
 }
 
 .hole:hover {
@@ -1791,6 +1960,118 @@ watch: {
   100% { opacity: 0; transform: translateX(-50%) translateY(-72px) scale(0.7); }
 }
 
+/* ── DAY MODE SPECIFIC STYLES ────────────────────────────────────── */
+
+/* Day Mode - Hide night elements */
+.day-mode .moon {
+  display: none !important;
+}
+
+.day-mode .stars-bg {
+  opacity: 0.3;
+}
+
+.day-mode .firefly {
+  opacity: 0.4;
+}
+
+/* Day Mode - Meadow */
+.day-mode .meadow {
+  background: linear-gradient(180deg, #7cb342 0%, #558b2f 50%, #33691e 100%);
+}
+
+/* Day Mode - Holes */
+.day-mode .hole {
+  background: radial-gradient(ellipse at 50% 65%, #8d6e63 0%, #5d4037 50%, #3e2723 100%);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3), inset 0 -3px 12px rgba(0, 0, 0, 0.5);
+}
+
+/* Day Mode - Title */
+.day-mode .title-row h1 {
+  color: #4a148c;
+  text-shadow: 0 0 20px rgba(255, 215, 0, 0.5), 3px 3px 0 #ce93d8;
+}
+
+/* Day Mode - Score Cards */
+.day-mode .score-card {
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.day-mode .score-label,
+.day-mode .status-msg,
+.day-mode .high-score-note {
+  color: #2D3748;
+}
+
+.day-mode .score-value {
+  color: #2D3748;
+}
+
+/* Day Mode - Buttons */
+.day-mode .btn-start {
+  background: linear-gradient(135deg, #66bb6a 0%, #43a047 100%);
+  box-shadow: 0 5px 0 #2e7d32;
+}
+
+.day-mode .btn-reset {
+  background: linear-gradient(135deg, #ff7043 0%, #f4511e 100%);
+  box-shadow: 0 5px 0 #bf360c;
+}
+
+/* Day Mode - Difficulty Buttons */
+.day-mode .difficulty-btn {
+  background: rgba(0, 0, 0, 0.1);
+  color: #2D3748;
+}
+
+.day-mode .active-diff {
+  background: linear-gradient(135deg, #66bb6a 0%, #43a047 100%);
+  color: white;
+}
+
+/* Day Mode - Shop */
+.day-mode .shop-panel {
+  background: linear-gradient(135deg, #ffffff, #f5f5f5);
+  border: 1px solid rgba(0, 0, 0, 0.2);
+}
+
+.day-mode .shop-header h3 {
+  color: #ff9800;
+}
+
+.day-mode .item-name {
+  color: #2D3748;
+}
+
+.day-mode .shop-item {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.day-mode .buy-btn {
+  background: linear-gradient(135deg, #66bb6a, #43a047);
+}
+
+/* Day Mode - Statistics */
+.day-mode .stats-panel {
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(10px);
+}
+
+.day-mode .stat-label {
+  color: #4a5568;
+}
+
+.day-mode .stat-value {
+  color: #2d3748;
+}
+
+/* Day Mode - Theme Toggle */
+.day-mode .theme-toggle {
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(0, 0, 0, 0.3);
+}
+
 /* ── Responsive ──────────────────────────────────────────────────── */
 @media (max-width: 480px) {
   .title-row h1  { font-size: 2rem; }
@@ -1803,5 +2084,7 @@ watch: {
   .score-value   { font-size: 1.5rem; }
   .shop-item     { grid-template-columns: auto 1fr auto; }
   .item-desc     { display: none; }
+  .theme-toggle  { width: 40px; height: 40px; top: 15px; right: 15px; }
+  .toggle-icon   { font-size: 1.4rem; }
 }
 </style>
